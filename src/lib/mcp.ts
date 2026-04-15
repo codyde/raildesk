@@ -2,13 +2,16 @@ import { createServerFn } from '@tanstack/react-start'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import crypto from 'node:crypto'
+import { redis } from './redis'
+import { saveMcpConfig, updateMcpLastConnected } from './db/queries'
 
-// ── Server-side state ──────────────────────────────────────────────
-let mcpClient: Client | null = null
-let currentServerUrl: string | null = null
+// Redis key constants
+const REDIS_OAUTH_STATE = 'raildesk:oauth:state'
+const REDIS_ACCESS_TOKEN = 'raildesk:oauth:access_token'
+const REDIS_MCP_SERVER_URL = 'raildesk:mcp:server_url'
 
-// OAuth state (persisted across requests in the server process)
-let oauthState: {
+// OAuth state type
+interface OAuthState {
   codeVerifier: string
   authServerMetadata: {
     authorization_endpoint: string
@@ -19,13 +22,34 @@ let oauthState: {
   clientSecret?: string
   redirectUri: string
   serverUrl: string
-} | null = null
+}
 
-let accessToken: string | null = null
+// ── Server-side state (MCP client stays in-memory, it's a live connection) ──
+let mcpClient: Client | null = null
+let currentServerUrl: string | null = null
+
+// ── Redis-backed state helpers ────────────────────────────────────
+async function getOAuthState(): Promise<OAuthState | null> {
+  const data = await redis.get(REDIS_OAUTH_STATE)
+  return data ? JSON.parse(data) : null
+}
+
+async function setOAuthState(state: OAuthState | null) {
+  if (state) {
+    // OAuth flows are short-lived, expire after 10 minutes
+    await redis.set(REDIS_OAUTH_STATE, JSON.stringify(state), 'EX', 600)
+  } else {
+    await redis.del(REDIS_OAUTH_STATE)
+  }
+}
+
+async function getAccessToken(): Promise<string | null> {
+  return redis.get(REDIS_ACCESS_TOKEN)
+}
 
 // Export accessor for the agent module to use
-export function getStoredAccessToken(): string | null {
-  return accessToken
+export async function getStoredAccessToken(): Promise<string | null> {
+  return getAccessToken()
 }
 
 // ── PKCE helpers ───────────────────────────────────────────────────
@@ -110,8 +134,8 @@ export const startOAuthFlow = createServerFn({ method: 'POST' })
       const codeChallenge = generateCodeChallenge(codeVerifier)
       const state = crypto.randomBytes(16).toString('hex')
 
-      // Store OAuth state for the callback
-      oauthState = {
+      // Store OAuth state in Redis
+      await setOAuthState({
         codeVerifier,
         authServerMetadata: {
           authorization_endpoint: authMeta.authorization_endpoint,
@@ -122,7 +146,7 @@ export const startOAuthFlow = createServerFn({ method: 'POST' })
         clientSecret,
         redirectUri: data.callbackUrl,
         serverUrl: data.serverUrl,
-      }
+      })
 
       const authUrl = new URL(authMeta.authorization_endpoint)
       authUrl.searchParams.set('response_type', 'code')
@@ -150,6 +174,7 @@ export const exchangeOAuthCode = createServerFn({ method: 'POST' })
   .inputValidator((data: { code: string }) => data)
   .handler(async ({ data }) => {
     try {
+      const oauthState = await getOAuthState()
       if (!oauthState || !oauthState.authServerMetadata) {
         return { success: false as const, error: 'No pending OAuth flow — start authentication first' }
       }
@@ -184,7 +209,12 @@ export const exchangeOAuthCode = createServerFn({ method: 'POST' })
         refresh_token?: string
       }
 
-      accessToken = tokenData.access_token
+      // Store token in Redis with appropriate TTL
+      const ttl = tokenData.expires_in ?? 86400
+      await redis.set(REDIS_ACCESS_TOKEN, tokenData.access_token, 'EX', ttl)
+
+      // Clean up OAuth state from Redis
+      await setOAuthState(null)
 
       return { success: true as const }
     } catch (error) {
@@ -199,7 +229,8 @@ export const exchangeOAuthCode = createServerFn({ method: 'POST' })
 export const checkAuth = createServerFn({ method: 'POST' })
   .inputValidator((data: Record<string, never>) => data)
   .handler(async () => {
-    return { authenticated: accessToken !== null }
+    const token = await getAccessToken()
+    return { authenticated: token !== null }
   })
 
 // ── MCP client management ──────────────────────────────────────────
@@ -221,11 +252,12 @@ async function getClient(serverUrl: string): Promise<Client> {
     version: '1.0.0',
   })
 
+  const token = await getAccessToken()
   const transportOptions: { requestInit?: RequestInit } = {}
-  if (accessToken) {
+  if (token) {
     transportOptions.requestInit = {
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${token}`,
       },
     }
   }
@@ -247,13 +279,22 @@ export const connectToMcp = createServerFn({ method: 'POST' })
     try {
       const client = await getClient(data.serverUrl)
       const { tools } = await client.listTools()
+
+      const mappedTools = tools.map((t) => ({
+        name: t.name,
+        description: t.description ?? '',
+        inputSchema: t.inputSchema as Record<string, unknown>,
+      }))
+
+      // Persist connection info: server URL in Redis, config in Postgres
+      await redis.set(REDIS_MCP_SERVER_URL, data.serverUrl)
+      const hostname = new URL(data.serverUrl).hostname
+      await saveMcpConfig(hostname, data.serverUrl)
+      await updateMcpLastConnected(data.serverUrl, mappedTools.length)
+
       return {
         success: true as const,
-        tools: tools.map((t) => ({
-          name: t.name,
-          description: t.description ?? '',
-          inputSchema: t.inputSchema as Record<string, unknown>,
-        })),
+        tools: mappedTools,
       }
     } catch (error) {
       mcpClient = null
@@ -310,7 +351,7 @@ export const disconnectMcp = createServerFn({ method: 'POST' })
       mcpClient = null
       currentServerUrl = null
     }
-    accessToken = null
-    oauthState = null
+    // Clear all auth/connection state from Redis
+    await redis.del(REDIS_ACCESS_TOKEN, REDIS_OAUTH_STATE, REDIS_MCP_SERVER_URL)
     return { success: true }
   })

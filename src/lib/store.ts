@@ -66,6 +66,8 @@ interface DesktopState {
   // Session continuity
   sessionId: string | null
   setSessionId: (id: string | null) => void
+  dbSessionId: string | null
+  setDbSessionId: (id: string | null) => void
 
   // Settings panel
   showSettings: boolean
@@ -104,12 +106,14 @@ export const useDesktopStore = create<DesktopState>((set) => ({
         m.id === id ? { ...m, ...updates } : m,
       ),
     })),
-  clearMessages: () => set({ messages: [], sessionId: null }),
+  clearMessages: () => set({ messages: [], sessionId: null, dbSessionId: null }),
   isProcessing: false,
   setIsProcessing: (processing) => set({ isProcessing: processing }),
 
   sessionId: null,
   setSessionId: (id) => set({ sessionId: id }),
+  dbSessionId: null,
+  setDbSessionId: (id) => set({ dbSessionId: id }),
 
   showSettings: false,
   toggleSettings: () => set((state) => ({ showSettings: !state.showSettings })),

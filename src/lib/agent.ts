@@ -1,13 +1,14 @@
 import { createServerFn } from '@tanstack/react-start'
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
+import { createChatSession, saveMessage, updateChatSessionAgentId } from './db/queries'
 
 // ── Stream event types ───────────────────────────────────────────────
 export type StreamEvent =
-  | { type: 'session'; sessionId: string }
+  | { type: 'session'; sessionId: string; dbSessionId: string }
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: string }
   | { type: 'tool_result'; toolUseId: string; content: string; isError: boolean }
-  | { type: 'done'; isError: boolean; costUsd: number; sessionId: string | null }
+  | { type: 'done'; isError: boolean; costUsd: number; sessionId: string | null; dbSessionId: string | null }
   | { type: 'error'; error: string }
 
 // ── Streaming agent via async generator ──────────────────────────────
@@ -19,6 +20,7 @@ export const streamAgentMessage = createServerFn({ method: 'POST' })
       mcpAccessToken?: string
       systemPrompt?: string
       sessionId?: string | null
+      dbSessionId?: string | null
     }) => data,
   )
   .handler(async function* ({ data }): AsyncGenerator<StreamEvent> {
@@ -37,6 +39,20 @@ export const streamAgentMessage = createServerFn({ method: 'POST' })
         }
       }
 
+      // Create or reuse a database session for persistence
+      let dbSessionId = data.dbSessionId ?? null
+      if (!dbSessionId) {
+        const session = await createChatSession(data.sessionId ?? undefined, data.mcpServerUrl)
+        dbSessionId = session.id
+      }
+
+      // Persist the user's message to Postgres
+      await saveMessage({
+        sessionId: dbSessionId,
+        role: 'user',
+        content: data.prompt,
+      })
+
       const conversation = claudeQuery({
         prompt: data.prompt,
         options: {
@@ -52,11 +68,16 @@ export const streamAgentMessage = createServerFn({ method: 'POST' })
       let currentSessionId: string | null = data.sessionId ?? null
       // Track pending tool_use IDs so we can mark them complete
       const pendingToolUseIds: string[] = []
+      // Accumulate assistant text for persistence
+      let assistantTextAccum = ''
+      const toolCallsAccum: { id: string; name: string; input: string; result?: string; isError?: boolean }[] = []
 
       for await (const message of conversation) {
         if (message.session_id && !currentSessionId) {
           currentSessionId = message.session_id
-          yield { type: 'session', sessionId: currentSessionId }
+          // Link the agent session ID to the database session
+          await updateChatSessionAgentId(dbSessionId, currentSessionId)
+          yield { type: 'session', sessionId: currentSessionId, dbSessionId }
         }
 
         if (message.type === 'assistant') {
@@ -81,16 +102,19 @@ export const streamAgentMessage = createServerFn({ method: 'POST' })
 
             for (const block of betaMessage.content) {
               if ('text' in block && typeof block.text === 'string') {
+                assistantTextAccum += block.text
                 yield { type: 'text', text: block.text }
               }
               if ('type' in block && block.type === 'tool_use' && 'name' in block) {
                 const toolId = 'id' in block ? (block.id as string) : crypto.randomUUID()
                 pendingToolUseIds.push(toolId)
+                const input = JSON.stringify('input' in block ? block.input : {})
+                toolCallsAccum.push({ id: toolId, name: block.name as string, input })
                 yield {
                   type: 'tool_use',
                   id: toolId,
                   name: block.name as string,
-                  input: JSON.stringify('input' in block ? block.input : {}),
+                  input,
                 }
               }
             }
@@ -115,6 +139,13 @@ export const streamAgentMessage = createServerFn({ method: 'POST' })
                     ? (b.content as { text?: string }[]).map((c) => c.text ?? JSON.stringify(c)).join('\n')
                     : JSON.stringify(b.content ?? '', null, 2)
 
+                // Track tool result for persistence
+                const tc = toolCallsAccum.find((t) => t.id === b.tool_use_id)
+                if (tc) {
+                  tc.result = content
+                  tc.isError = b.is_error === true
+                }
+
                 yield {
                   type: 'tool_result',
                   toolUseId: b.tool_use_id,
@@ -138,12 +169,23 @@ export const streamAgentMessage = createServerFn({ method: 'POST' })
           }
           pendingToolUseIds.length = 0
 
+          // Persist assistant response to Postgres
+          if (assistantTextAccum || toolCallsAccum.length > 0) {
+            await saveMessage({
+              sessionId: dbSessionId!,
+              role: 'assistant',
+              content: assistantTextAccum,
+              toolCalls: toolCallsAccum.length > 0 ? toolCallsAccum as Record<string, unknown>[] : null,
+            })
+          }
+
           const resultMsg = message as Record<string, unknown>
           yield {
             type: 'done',
             isError: (resultMsg.is_error as boolean) ?? false,
             costUsd: (resultMsg.total_cost_usd as number) ?? 0,
             sessionId: currentSessionId,
+            dbSessionId,
           }
         }
       }
@@ -160,5 +202,6 @@ export const getAccessToken = createServerFn({ method: 'POST' })
   .inputValidator((data: Record<string, never>) => data)
   .handler(async () => {
     const { getStoredAccessToken } = await import('./mcp')
-    return { token: getStoredAccessToken() }
+    const token = await getStoredAccessToken()
+    return { token }
   })

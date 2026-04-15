@@ -15,6 +15,7 @@ import remarkGfm from 'remark-gfm'
 import { useDesktopStore, type ChatMessage, type ToolCall } from '@/lib/store'
 import { callTool } from '@/lib/mcp'
 import { streamAgentMessage, getAccessToken, type StreamEvent } from '@/lib/agent'
+import { persistMessage } from '@/lib/data'
 
 export function TerminalChat() {
   const messages = useDesktopStore((s) => s.messages)
@@ -27,6 +28,8 @@ export function TerminalChat() {
   const mcpServerUrl = useDesktopStore((s) => s.mcpServerUrl)
   const sessionId = useDesktopStore((s) => s.sessionId)
   const setSessionId = useDesktopStore((s) => s.setSessionId)
+  const dbSessionId = useDesktopStore((s) => s.dbSessionId)
+  const setDbSessionId = useDesktopStore((s) => s.setDbSessionId)
 
   const [input, setInput] = useState('')
   const [commandHistory, setCommandHistory] = useState<string[]>([])
@@ -193,19 +196,19 @@ export function TerminalChat() {
             },
           })
 
+          const toolCallData = {
+            id: toolCallId,
+            name: parsed.tool,
+            arguments: JSON.stringify(parsed.args),
+            status: result.isError ? 'error' as const : 'completed' as const,
+            result: result.content,
+            isError: !!result.isError,
+          }
+
           // Update the tool call with its result
           updateMessage(toolMsgId, {
             content: `Called ${parsed.tool}`,
-            toolCalls: [
-              {
-                id: toolCallId,
-                name: parsed.tool,
-                arguments: JSON.stringify(parsed.args),
-                status: result.isError ? 'error' as const : 'completed' as const,
-                result: result.content,
-                isError: !!result.isError,
-              },
-            ],
+            toolCalls: [toolCallData],
           })
 
           addMessage({
@@ -219,6 +222,21 @@ export function TerminalChat() {
               isError: !!result.isError,
             },
           })
+
+          // Persist tool call + result to Postgres
+          const persisted = await persistMessage({
+            data: {
+              dbSessionId,
+              role: 'assistant',
+              content: result.content,
+              toolCalls: JSON.stringify([toolCallData]),
+              toolResult: JSON.stringify({ toolCallId: parsed.tool, content: result.content, isError: !!result.isError }),
+              mcpServerUrl,
+            },
+          }) as { message: unknown; dbSessionId: string }
+          if (!dbSessionId && persisted.dbSessionId) {
+            setDbSessionId(persisted.dbSessionId)
+          }
         } catch (err) {
           updateMessage(toolMsgId, {
             content: `Failed: ${parsed.tool}`,
@@ -275,6 +293,7 @@ export function TerminalChat() {
             mcpServerUrl: isConnected ? mcpServerUrl : undefined,
             mcpAccessToken,
             sessionId: sessionId ?? undefined,
+            dbSessionId: dbSessionId ?? undefined,
           },
         })
 
@@ -283,6 +302,9 @@ export function TerminalChat() {
 
           if (event.type === 'session') {
             setSessionId(event.sessionId)
+            if ('dbSessionId' in event && event.dbSessionId) {
+              setDbSessionId(event.dbSessionId as string)
+            }
           }
 
           if (event.type === 'text') {
@@ -342,6 +364,9 @@ export function TerminalChat() {
 
           if (event.type === 'done') {
             if (event.sessionId) setSessionId(event.sessionId)
+            if ('dbSessionId' in event && event.dbSessionId) {
+              setDbSessionId(event.dbSessionId as string)
+            }
           }
 
           if (event.type === 'error') {
@@ -392,7 +417,7 @@ export function TerminalChat() {
         setIsProcessing(false)
       }
     },
-    [input, isProcessing, isConnected, availableTools, mcpServerUrl, sessionId, addMessage, updateMessage, parseCommand, setIsProcessing, setSessionId],
+    [input, isProcessing, isConnected, availableTools, mcpServerUrl, sessionId, dbSessionId, addMessage, updateMessage, parseCommand, setIsProcessing, setSessionId, setDbSessionId],
   )
 
   const handleKeyDown = useCallback(
