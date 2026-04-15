@@ -13,7 +13,7 @@ export function SettingsPanel() {
   const toggleSettings = useDesktopStore((s) => s.toggleSettings)
   const addMessage = useDesktopStore((s) => s.addMessage)
 
-  const [urlInput, setUrlInput] = useState(mcpServerUrl || 'https://mcp.railway-staging.com/api/mcp')
+  const [urlInput, setUrlInput] = useState(mcpServerUrl || 'https://mcp.railway-staging.com')
   const [isConnecting, setIsConnecting] = useState(false)
   const [isAuthenticating, setIsAuthenticating] = useState(false)
   const [isAuthenticated, setIsAuthenticated] = useState(false)
@@ -33,15 +33,36 @@ export function SettingsPanel() {
         setIsAuthenticated(true)
         setIsAuthenticating(false)
         setError('')
-        addMessage({
-          id: crypto.randomUUID(),
-          role: 'system',
-          content: 'OAuth authentication successful. You can now connect to the MCP server.',
-          timestamp: Date.now(),
-        })
+
+        // Auto-connect after successful authentication
+        const url = urlInput.trim()
+        if (url) {
+          setIsConnecting(true)
+          try {
+            const result = await connectToMcp({ data: { serverUrl: url } })
+            if (result.success) {
+              setMcpServerUrl(url)
+              setIsConnected(true)
+              setAvailableTools(result.tools)
+              addMessage({
+                id: crypto.randomUUID(),
+                role: 'system',
+                content: `Authenticated and connected. ${result.tools.length} tools available.`,
+                timestamp: Date.now(),
+              })
+              toggleSettings()
+            } else {
+              setError(result.error ?? 'Connection failed')
+            }
+          } catch (err) {
+            setError(err instanceof Error ? err.message : 'Connection failed')
+          } finally {
+            setIsConnecting(false)
+          }
+        }
       }
     },
-    [addMessage],
+    [addMessage, urlInput, setMcpServerUrl, setIsConnected, setAvailableTools, toggleSettings],
   )
 
   useEffect(() => {

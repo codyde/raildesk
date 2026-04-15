@@ -1,6 +1,4 @@
 import { createServerFn } from '@tanstack/react-start'
-import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
-import { createChatSession, saveMessage, updateChatSessionAgentId } from './db/queries'
 
 // ── Stream event types ───────────────────────────────────────────────
 export type StreamEvent =
@@ -25,6 +23,9 @@ export const streamAgentMessage = createServerFn({ method: 'POST' })
   )
   .handler(async function* ({ data }): AsyncGenerator<StreamEvent> {
     try {
+      const { query: claudeQuery } = await import('@anthropic-ai/claude-agent-sdk')
+      const { createChatSession, saveMessage, updateChatSessionAgentId } = await import('./db/queries')
+
       const mcpServers: Record<string, { type: 'http'; url: string; headers?: Record<string, string> }> = {}
 
       if (data.mcpServerUrl) {

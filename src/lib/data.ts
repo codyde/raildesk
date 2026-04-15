@@ -1,10 +1,10 @@
 import { createServerFn } from '@tanstack/react-start'
-import { getRecentSessions, getSessionMessages, getSavedMcpConfigs, createChatSession, saveMessage } from './db/queries'
 
 // ── Load recent chat sessions ─────────────────────────────────────
 export const loadRecentSessions = createServerFn({ method: 'POST' })
   .inputValidator((data: { limit?: number }) => data)
   .handler(async ({ data }) => {
+    const { getRecentSessions } = await import('./db/queries')
     const sessions = await getRecentSessions(data.limit ?? 20)
     return { sessions }
   })
@@ -13,6 +13,7 @@ export const loadRecentSessions = createServerFn({ method: 'POST' })
 export const loadSessionMessages = createServerFn({ method: 'POST' })
   .inputValidator((data: { sessionId: string }) => data)
   .handler(async ({ data }) => {
+    const { getSessionMessages } = await import('./db/queries')
     const messages = await getSessionMessages(data.sessionId)
     return { messages }
   })
@@ -28,6 +29,7 @@ export const persistMessage = createServerFn({ method: 'POST' })
     mcpServerUrl?: string
   }) => data)
   .handler(async ({ data }) => {
+    const { createChatSession, saveMessage } = await import('./db/queries')
     let sessionId = data.dbSessionId
     if (!sessionId) {
       const session = await createChatSession(undefined, data.mcpServerUrl)
@@ -47,6 +49,7 @@ export const persistMessage = createServerFn({ method: 'POST' })
 export const loadSavedMcpConfigs = createServerFn({ method: 'POST' })
   .inputValidator((data: Record<string, never>) => data)
   .handler(async () => {
+    const { getSavedMcpConfigs } = await import('./db/queries')
     const configs = await getSavedMcpConfigs()
     return { configs }
   })

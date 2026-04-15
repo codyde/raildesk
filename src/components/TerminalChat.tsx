@@ -632,7 +632,7 @@ function MessageLine({ message }: { message: ChatMessage }) {
             isError ? 'text-rail-red' : isAgentResponse ? 'text-rail-text' : 'text-rail-green'
           } markdown-body`}
         >
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content ?? ''}</ReactMarkdown>
         </div>
       </div>
     )

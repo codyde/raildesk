@@ -1,9 +1,5 @@
 import { createServerFn } from '@tanstack/react-start'
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import crypto from 'node:crypto'
-import { redis } from './redis'
-import { saveMcpConfig, updateMcpLastConnected } from './db/queries'
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 
 // Redis key constants
 const REDIS_OAUTH_STATE = 'raildesk:oauth:state'
@@ -29,22 +25,30 @@ let mcpClient: Client | null = null
 let currentServerUrl: string | null = null
 
 // ── Redis-backed state helpers ────────────────────────────────────
+async function getRedis() {
+  const { getRedis: _getRedis } = await import('./redis')
+  return _getRedis()
+}
+
 async function getOAuthState(): Promise<OAuthState | null> {
-  const data = await redis.get(REDIS_OAUTH_STATE)
+  const r = await getRedis()
+  const data = await r.get(REDIS_OAUTH_STATE)
   return data ? JSON.parse(data) : null
 }
 
 async function setOAuthState(state: OAuthState | null) {
+  const r = await getRedis()
   if (state) {
     // OAuth flows are short-lived, expire after 10 minutes
-    await redis.set(REDIS_OAUTH_STATE, JSON.stringify(state), 'EX', 600)
+    await r.set(REDIS_OAUTH_STATE, JSON.stringify(state), 'EX', 600)
   } else {
-    await redis.del(REDIS_OAUTH_STATE)
+    await r.del(REDIS_OAUTH_STATE)
   }
 }
 
 async function getAccessToken(): Promise<string | null> {
-  return redis.get(REDIS_ACCESS_TOKEN)
+  const r = await getRedis()
+  return r.get(REDIS_ACCESS_TOKEN)
 }
 
 // Export accessor for the agent module to use
@@ -53,11 +57,13 @@ export async function getStoredAccessToken(): Promise<string | null> {
 }
 
 // ── PKCE helpers ───────────────────────────────────────────────────
-function generateCodeVerifier(): string {
+async function generateCodeVerifier(): Promise<string> {
+  const crypto = await import('node:crypto')
   return crypto.randomBytes(32).toString('base64url')
 }
 
-function generateCodeChallenge(verifier: string): string {
+async function generateCodeChallenge(verifier: string): Promise<string> {
+  const crypto = await import('node:crypto')
   return crypto.createHash('sha256').update(verifier).digest('base64url')
 }
 
@@ -68,7 +74,7 @@ export const startOAuthFlow = createServerFn({ method: 'POST' })
     try {
       // Step 1: Discover resource metadata
       const resourceUrl = new URL(data.serverUrl)
-      const resourceMetaUrl = `${resourceUrl.origin}/api/auth/.well-known/oauth-protected-resource`
+      const resourceMetaUrl = `${resourceUrl.origin}/.well-known/oauth-protected-resource`
 
       const resourceRes = await fetch(resourceMetaUrl)
       if (!resourceRes.ok) {
@@ -130,8 +136,9 @@ export const startOAuthFlow = createServerFn({ method: 'POST' })
       }
 
       // Step 4: Generate PKCE values and auth URL
-      const codeVerifier = generateCodeVerifier()
-      const codeChallenge = generateCodeChallenge(codeVerifier)
+      const codeVerifier = await generateCodeVerifier()
+      const codeChallenge = await generateCodeChallenge(codeVerifier)
+      const crypto = await import('node:crypto')
       const state = crypto.randomBytes(16).toString('hex')
 
       // Store OAuth state in Redis
@@ -155,6 +162,8 @@ export const startOAuthFlow = createServerFn({ method: 'POST' })
       authUrl.searchParams.set('code_challenge', codeChallenge)
       authUrl.searchParams.set('code_challenge_method', 'S256')
       authUrl.searchParams.set('state', state)
+      authUrl.searchParams.set('scope', 'openid profile email workspace:member')
+      authUrl.searchParams.set('resource', resourceUrl.origin)
 
       return {
         success: true as const,
@@ -211,7 +220,8 @@ export const exchangeOAuthCode = createServerFn({ method: 'POST' })
 
       // Store token in Redis with appropriate TTL
       const ttl = tokenData.expires_in ?? 86400
-      await redis.set(REDIS_ACCESS_TOKEN, tokenData.access_token, 'EX', ttl)
+      const r = await getRedis()
+      await r.set(REDIS_ACCESS_TOKEN, tokenData.access_token, 'EX', ttl)
 
       // Clean up OAuth state from Redis
       await setOAuthState(null)
@@ -247,7 +257,10 @@ async function getClient(serverUrl: string): Promise<Client> {
     }
   }
 
-  const client = new Client({
+  const { Client: McpClient } = await import('@modelcontextprotocol/sdk/client/index.js')
+  const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js')
+
+  const client = new McpClient({
     name: 'railway-desktop-terminal',
     version: '1.0.0',
   })
@@ -287,8 +300,10 @@ export const connectToMcp = createServerFn({ method: 'POST' })
       }))
 
       // Persist connection info: server URL in Redis, config in Postgres
-      await redis.set(REDIS_MCP_SERVER_URL, data.serverUrl)
+      const r = await getRedis()
+      await r.set(REDIS_MCP_SERVER_URL, data.serverUrl)
       const hostname = new URL(data.serverUrl).hostname
+      const { saveMcpConfig, updateMcpLastConnected } = await import('./db/queries')
       await saveMcpConfig(hostname, data.serverUrl)
       await updateMcpLastConnected(data.serverUrl, mappedTools.length)
 
@@ -352,6 +367,7 @@ export const disconnectMcp = createServerFn({ method: 'POST' })
       currentServerUrl = null
     }
     // Clear all auth/connection state from Redis
-    await redis.del(REDIS_ACCESS_TOKEN, REDIS_OAUTH_STATE, REDIS_MCP_SERVER_URL)
+    const r = await getRedis()
+    await r.del(REDIS_ACCESS_TOKEN, REDIS_OAUTH_STATE, REDIS_MCP_SERVER_URL)
     return { success: true }
   })
