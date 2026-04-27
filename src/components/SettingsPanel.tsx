@@ -13,7 +13,7 @@ export function SettingsPanel() {
   const toggleSettings = useDesktopStore((s) => s.toggleSettings)
   const addMessage = useDesktopStore((s) => s.addMessage)
 
-  const [urlInput, setUrlInput] = useState(mcpServerUrl || 'https://mcp.railway-staging.com')
+  const [urlInput, setUrlInput] = useState(mcpServerUrl || 'https://mcp.railway.com')
   const [isConnecting, setIsConnecting] = useState(false)
   const [isAuthenticating, setIsAuthenticating] = useState(false)
   const [isAuthenticated, setIsAuthenticated] = useState(false)
