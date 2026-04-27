@@ -191,7 +191,7 @@ export function SettingsPanel() {
             type="text"
             value={urlInput}
             onChange={(e) => setUrlInput(e.target.value)}
-            placeholder="https://your-mcp-server.railway.app/mcp"
+            placeholder="https://mcp.railway.com"
             className="w-full bg-rail-deep border border-rail-border rounded px-3 py-2 text-xs text-rail-text placeholder:text-rail-text-muted outline-none focus:border-rail-purple transition-colors font-mono"
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
